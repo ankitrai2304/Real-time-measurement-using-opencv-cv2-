@@ -3,137 +3,182 @@ import cv2
 import numpy as np
 from PIL import Image
 import io
+import os
+
+st.set_page_config(page_title="Object Measurement Tool", layout="wide")
 
 def main():
     st.title("Object Measurement Tool")
-    st.write("Upload an image to measure objects. Include a reference object of known width (preferably a credit card or similar).")
+    st.write("Upload an image and draw lines to measure objects")
     
-    # File uploader for image
     uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
     
-    # Reference object width input (in cm)
-    reference_width = st.number_input("Enter the width of reference object in cm (default: 8.56cm for credit card)", 
-                                     min_value=0.1, value=8.56, step=0.1)
-    
     if uploaded_file is not None:
-        # Convert uploaded file to OpenCV format
         image = Image.open(uploaded_file)
         image = np.array(image)
         
-        # Make a copy for drawing
-        original_image = image.copy()
+        working_image = image.copy()
+        height, width = working_image.shape[:2]
         
-        # Convert to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        col1, col2 = st.columns([2, 1])
         
-        # Apply GaussianBlur to reduce noise
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # Edge detection
-        edged = cv2.Canny(blurred, 50, 150)
-        
-        # Find contours
-        contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Sort contours by area (largest first)
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
-        
-        # Display image with found contours
-        contour_image = original_image.copy()
-        cv2.drawContours(contour_image, contours, -1, (0, 255, 0), 2)
-        st.image(contour_image, caption="Detected Objects", use_column_width=True)
-        
-        # Allow user to select reference object
-        st.write("### Select Reference Object")
-        st.write("Please select the contour number that corresponds to your reference object (like a credit card):")
-        
-        reference_idx = st.selectbox("Reference object contour number", 
-                                    options=list(range(min(5, len(contours)))), 
-                                    format_func=lambda x: f"Contour {x+1}")
-        
-        if reference_idx is not None and contours:
-            # Get the reference contour
-            reference_contour = contours[reference_idx]
+        with col2:
+            st.subheader("Reference Measurement")
+            st.write("1. Draw a reference line on a known object")
+            st.write("2. Enter the real-world length of that line")
             
-            # Get bounding rectangle of reference object
-            ref_x, ref_y, ref_w, ref_h = cv2.boundingRect(reference_contour)
+            reference_length = st.number_input(
+                "Reference length (cm)", 
+                min_value=0.1, 
+                value=10.0, 
+                step=0.1,
+                help="The real-world length of your reference line in centimeters"
+            )
             
-            # Draw the reference object
-            result_image = original_image.copy()
-            cv2.rectangle(result_image, (ref_x, ref_y), (ref_x + ref_w, ref_y + ref_h), (0, 255, 0), 2)
-            cv2.putText(result_image, "Reference Object", (ref_x, ref_y - 10), 
+            st.subheader("Draw Lines")
+            st.write("Click and drag to draw measurement lines")
+            
+            clear_button = st.button("Clear All Lines")
+            
+            st.subheader("Measurements")
+            measurements_placeholder = st.empty()
+            
+        if 'points' not in st.session_state:
+            st.session_state.points = []
+        if 'ref_points' not in st.session_state:
+            st.session_state.ref_points = []
+        if 'ref_set' not in st.session_state:
+            st.session_state.ref_set = False
+        if 'drawing_ref' not in st.session_state:
+            st.session_state.drawing_ref = True
+        if 'measurements' not in st.session_state:
+            st.session_state.measurements = []
+            
+        if clear_button:
+            st.session_state.points = []
+            st.session_state.ref_points = []
+            st.session_state.ref_set = False
+            st.session_state.drawing_ref = True
+            st.session_state.measurements = []
+            
+        with col1:
+            canvas_result = st_canvas(image, height=height, width=width)
+            
+        if canvas_result.json_data is not None:
+            objects = canvas_result.json_data["objects"]
+            
+            for obj in objects:
+                if obj["type"] == "line":
+                    start_x, start_y = obj["x1"], obj["y1"]
+                    end_x, end_y = obj["x2"], obj["y2"]
+                    
+                    if not st.session_state.ref_set:
+                        pixel_distance = np.sqrt((end_x - start_x)**2 + (end_y - start_y)**2)
+                        # Calculate pixels per cm using known reference length
+                        st.session_state.pixels_per_cm = pixel_distance / reference_length
+                        st.session_state.ref_points = [(start_x, start_y), (end_x, end_y)]
+                        st.session_state.ref_set = True
+                        st.session_state.drawing_ref = False
+                    else:
+                        if [(start_x, start_y), (end_x, end_y)] not in st.session_state.points:
+                            st.session_state.points.append([(start_x, start_y), (end_x, end_y)])
+                            
+                            pixel_distance = np.sqrt((end_x - start_x)**2 + (end_y - start_y)**2)
+                            cm_distance = pixel_distance / st.session_state.pixels_per_cm
+                            st.session_state.measurements.append(cm_distance)
+            
+        result_image = working_image.copy()
+        
+        if st.session_state.ref_set and len(st.session_state.ref_points) == 2:
+            start, end = st.session_state.ref_points
+            cv2.line(result_image, 
+                    (int(start[0]), int(start[1])), 
+                    (int(end[0]), int(end[1])), 
+                    (0, 255, 0), 2)
+            cv2.putText(result_image, 
+                       f"Reference: {reference_length:.1f} cm", 
+                       (int(start[0]), int(start[1] - 10)), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
-            # Calculate pixels per cm
-            pixels_per_cm = ref_w / reference_width
+        for i, (points, measurement) in enumerate(zip(st.session_state.points, st.session_state.measurements)):
+            start, end = points
+            cv2.line(result_image, 
+                    (int(start[0]), int(start[1])), 
+                    (int(end[0]), int(end[1])), 
+                    (0, 0, 255), 2)
+            cv2.putText(result_image, 
+                       f"{measurement:.1f} cm", 
+                       (int(start[0]), int(start[1] - 10)), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
             
-            # Now measure other objects
-            st.write("### Measure Other Objects")
-            object_idx = st.selectbox("Select object to measure", 
-                                     options=list(range(min(10, len(contours)))), 
-                                     format_func=lambda x: f"Object {x+1}")
+        col1.image(result_image, use_column_width=True)
+        
+        measurements_text = ""
+        if st.session_state.ref_set:
+            measurements_text += f"Reference: {reference_length:.2f} cm\n\n"
             
-            if object_idx is not None:
-                # Get the selected object contour
-                object_contour = contours[object_idx]
+            for i, measurement in enumerate(st.session_state.measurements):
+                measurements_text += f"Line {i+1}: {measurement:.2f} cm\n"
                 
-                # Get bounding rectangle
-                obj_x, obj_y, obj_w, obj_h = cv2.boundingRect(object_contour)
-                
-                # Calculate real-world dimensions
-                width_cm = obj_w / pixels_per_cm
-                height_cm = obj_h / pixels_per_cm
-                
-                # Draw the object with measurements
-                cv2.rectangle(result_image, (obj_x, obj_y), (obj_x + obj_w, obj_y + obj_h), (0, 0, 255), 2)
-                cv2.putText(result_image, f"Width: {width_cm:.1f}cm", (obj_x, obj_y - 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                cv2.putText(result_image, f"Height: {height_cm:.1f}cm", (obj_x, obj_y - 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                
-                st.image(result_image, caption="Object Measurements", use_column_width=True)
-                
-                # Display measurements in text form as well
-                st.write(f"### Measurement Results:")
-                st.write(f"- Width: {width_cm:.2f} cm")
-                st.write(f"- Height: {height_cm:.2f} cm")
-                
-                # Calculate area if appropriate
-                area_cm2 = width_cm * height_cm
-                st.write(f"- Approximate Area: {area_cm2:.2f} cm²")
-                
-                # Advanced options
-                if st.checkbox("Show advanced measurement options"):
-                    # Calculate perimeter
-                    perimeter_pixels = cv2.arcLength(object_contour, True)
-                    perimeter_cm = perimeter_pixels / pixels_per_cm
-                    st.write(f"- Perimeter: {perimeter_cm:.2f} cm")
-                    
-                    # Minimum enclosing circle
-                    (x, y), radius = cv2.minEnclosingCircle(object_contour)
-                    radius_cm = radius / pixels_per_cm
-                    st.write(f"- Equivalent Circle Radius: {radius_cm:.2f} cm")
-                    
-                    # Aspect ratio
-                    aspect_ratio = width_cm / height_cm if height_cm > 0 else 0
-                    st.write(f"- Aspect Ratio (width/height): {aspect_ratio:.2f}")
-
-    
+            measurements_placeholder.text_area("Results", measurements_text, height=200)
+            
+        if not st.session_state.ref_set:
+            col1.info("First, draw a reference line on an object with known length")
+        else:
+            col1.info("Now draw lines to measure other objects")
+            
     with st.expander("How to use this app"):
         st.write("""
         1. Upload an image containing objects you want to measure
-        2. Make sure the image includes a reference object with known dimensions (e.g., credit card = 8.56cm width)
-        3. Select the contour number corresponding to your reference object
-        4. Select other objects to measure
+        2. Draw a line on an object with known dimensions (e.g., a ruler, credit card, etc.)
+        3. Enter the real-world length of that line in centimeters
+        4. Draw additional lines on objects you want to measure`
         5. The app will calculate and display real-world measurements
         
         For best results:
         - Ensure good lighting with minimal shadows
-        - Place objects on a contrasting background 
-        - Position camera directly above objects (bird's eye view)
-        - Keep objects separated from each other
-        - Make sure the reference object is in the same plane as objects to be measured
+        - Keep the camera perpendicular to the objects being measured
+        - Use a clear reference object
+        - Ensure all objects are in the same plane for accurate measurements
         """)
+def st_canvas(image, height, width):
+    image_placeholder = st.empty()
+    image_placeholder.image(image, use_column_width=True)
+    
+    st.write("Enter coordinates manually:")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        start_x = st.number_input("Start X", min_value=0, max_value=width, value=width//4)
+        start_y = st.number_input("Start Y", min_value=0, max_value=height, value=height//2)
+    with col2:
+        end_x = st.number_input("End X", min_value=0, max_value=width, value=(width*3)//4)
+        end_y = st.number_input("End Y", min_value=0, max_value=height, value=height//2)
+    
+    draw_line = st.button(
+        "Draw Line" if st.session_state.drawing_ref else "Draw Measurement Line"
+    )
+    result = type('obj', (object,), {
+        'json_data': {
+            'objects': []
+        }
+    })
+    
+    if draw_line:
+        result.json_data["objects"].append({
+            "type": "line",
+            "x1": start_x,
+            "y1": start_y,
+            "x2": end_x,
+            "y2": end_y
+        })
+        
+        temp_img = image.copy()
+        color = (0, 255, 0) if st.session_state.drawing_ref else (0, 0, 255)
+        cv2.line(temp_img, (start_x, start_y), (end_x, end_y), color, 2)
+        image_placeholder.image(temp_img, use_column_width=True)
+    
+    return result
 
 if __name__ == "__main__":
     main()
