@@ -1,4 +1,4 @@
-Here’s a clean and professional README description for your project:
+Here’s a clean and professional README description for project:
 
 ---
 
